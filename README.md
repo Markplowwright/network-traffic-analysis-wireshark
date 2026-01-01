@@ -36,30 +36,6 @@ SSH, DNS, HTTP, FTP
 
 Linux command-line tools
 
-network-traffic-analysis/
-├── pcaps/
-│   ├── baseline_normal_traffic.pcap
-│   ├── ssh_bruteforce_attempt.pcap
-│   ├── tcp_retransmission_issue.pcap
-│   └── dns_failure_scenario.pcap
-│
-├── scripts/
-│   └── pcap_analyzer.py
-│
-├── docs/
-│   ├── investigation-workflow.md
-│   ├── tcp-handshake-analysis.md
-│   ├── ssh-bruteforce-indicators.md
-│   ├── filter-reference.md
-│   └── cli-analysis.md
-│
-├── screenshots/
-│   ├── tcp_handshake.png
-│   ├── ssh_auth_failures.png
-│   └── retransmissions_rst.png
-│
-└── README.md
-
 Traffic Scenarios Analyzed
 1. Baseline Network Traffic
 
