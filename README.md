@@ -36,7 +36,6 @@ SSH, DNS, HTTP, FTP
 
 Linux command-line tools
 
-Project Structure
 network-traffic-analysis/
 ├── pcaps/
 │   ├── baseline_normal_traffic.pcap
