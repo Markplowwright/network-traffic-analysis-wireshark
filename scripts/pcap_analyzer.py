@@ -76,7 +76,6 @@ def process_dns_packet(
     try:
         dns = dpkt.dns.DNS(udp_payload)
 
-        # Extract qname (best effort)
         qname = ""
         if dns.qd and len(dns.qd) > 0 and hasattr(dns.qd[0], "name"):
             qname = dns.qd[0].name or ""
@@ -88,7 +87,6 @@ def process_dns_packet(
             dns_query_keys.add((src_ip, dst_ip, dns.id, qhash))
         else:  # response
             dns_rcode_counts[dns_rcode_name(dns.rcode)] += 1
-            # reverse direction so it matches the query-key format
             dns_response_keys.add((dst_ip, src_ip, dns.id, qhash))
 
     except Exception:
@@ -113,10 +111,20 @@ def main():
     dns_responses = 0
     dns_query_keys = set()     # (client_ip, dns_server_ip, dns_id, qname_hash)
     dns_response_keys = set()  # stored reversed to match query direction
+    dns_domain_counts = Counter()
+    dns_rcode_counts = Counter()
 
-    # PASS 5 DNS depth
-    dns_domain_counts = Counter()  # qname -> count (queries)
-    dns_rcode_counts = Counter()   # rcode name -> count (responses)
+    # PASS 6 TCP indicators
+    tcp_syn = 0
+    tcp_synack = 0
+    tcp_ack = 0
+    tcp_rst = 0
+    tcp_fin = 0
+
+    # Handshake estimation sets (track by 4-tuple)
+    # Attempt key: (client_ip, server_ip, client_port, server_port)
+    syn_seen = set()
+    synack_seen = set()
 
     try:
         with open(args.pcap, "rb") as f:
@@ -146,6 +154,30 @@ def main():
 
                     if l3.p == dpkt.ip.IP_PROTO_TCP:
                         tcp_count += 1
+                        tcp = l3.data
+
+                        if isinstance(tcp, dpkt.tcp.TCP):
+                            flags = tcp.flags
+                            sport = tcp.sport
+                            dport = tcp.dport
+
+                            # Flag counters
+                            if flags & dpkt.tcp.TH_SYN:
+                                tcp_syn += 1
+                                # Record SYN attempt (client -> server)
+                                syn_seen.add((src_ip, dst_ip, sport, dport))
+
+                            if (flags & dpkt.tcp.TH_SYN) and (flags & dpkt.tcp.TH_ACK):
+                                tcp_synack += 1
+                                # Record SYN-ACK as success for the reverse tuple
+                                synack_seen.add((dst_ip, src_ip, dport, sport))
+
+                            if flags & dpkt.tcp.TH_ACK:
+                                tcp_ack += 1
+                            if flags & dpkt.tcp.TH_RST:
+                                tcp_rst += 1
+                            if flags & dpkt.tcp.TH_FIN:
+                                tcp_fin += 1
 
                     elif l3.p == dpkt.ip.IP_PROTO_UDP:
                         udp_count += 1
@@ -153,8 +185,6 @@ def main():
 
                         # DNS over UDP/53
                         if isinstance(udp, dpkt.udp.UDP) and (udp.sport == 53 or udp.dport == 53):
-                            # Count query vs response (best effort)
-                            # We'll infer query/response by parsing. If parse fails, no increment.
                             before_q = len(dns_query_keys)
                             before_r = len(dns_response_keys)
 
@@ -172,6 +202,7 @@ def main():
                                 dns_queries += 1
                             if len(dns_response_keys) > before_r:
                                 dns_responses += 1
+
                     else:
                         other_count += 1
 
@@ -182,12 +213,32 @@ def main():
 
                     if l3.nxt == dpkt.ip.IP_PROTO_TCP:
                         tcp_count += 1
+                        tcp = l3.data
+
+                        if isinstance(tcp, dpkt.tcp.TCP):
+                            flags = tcp.flags
+                            sport = tcp.sport
+                            dport = tcp.dport
+
+                            if flags & dpkt.tcp.TH_SYN:
+                                tcp_syn += 1
+                                syn_seen.add((src_ip, dst_ip, sport, dport))
+
+                            if (flags & dpkt.tcp.TH_SYN) and (flags & dpkt.tcp.TH_ACK):
+                                tcp_synack += 1
+                                synack_seen.add((dst_ip, src_ip, dport, sport))
+
+                            if flags & dpkt.tcp.TH_ACK:
+                                tcp_ack += 1
+                            if flags & dpkt.tcp.TH_RST:
+                                tcp_rst += 1
+                            if flags & dpkt.tcp.TH_FIN:
+                                tcp_fin += 1
 
                     elif l3.nxt == dpkt.ip.IP_PROTO_UDP:
                         udp_count += 1
                         udp = l3.data
 
-                        # DNS over UDP/53
                         if isinstance(udp, dpkt.udp.UDP) and (udp.sport == 53 or udp.dport == 53):
                             before_q = len(dns_query_keys)
                             before_r = len(dns_response_keys)
@@ -225,6 +276,11 @@ def main():
     dns_unanswered_ratio = (dns_unanswered / dns_queries) if dns_queries else 0.0
     dns_risk_flag = (dns_queries > 0) and (dns_unanswered_ratio >= args.dns_unanswered_threshold)
 
+    # PASS 6: TCP handshake estimates (best-effort)
+    handshake_attempts = len(syn_seen)
+    handshake_successes = len(syn_seen.intersection(synack_seen))
+    failed_handshakes_est = max(handshake_attempts - handshake_successes, 0)
+
     # Output
     print("PCAP Analyzer starting...")
     print(f"PCAP file: {args.pcap}")
@@ -238,7 +294,7 @@ def main():
         print(f"Capture end:   {end}")
         print(f"Duration (s):  {duration:.2f}")
 
-    print("Protocol breakdown (PASS 3/4/5):")
+    print("Protocol breakdown (PASS 3/4/5/6):")
     print(f"  TCP:   {tcp_count}")
     print(f"  UDP:   {udp_count}")
     print(f"  Other: {other_count}")
@@ -250,7 +306,6 @@ def main():
     print(f"  Unanswered ratio:   {dns_unanswered_ratio:.2f}")
     print(f"  DNS risk flag:      {'YES' if dns_risk_flag else 'NO'} (threshold={args.dns_unanswered_threshold})")
 
-    # PASS 5 depth: RCODEs + Top domains
     if dns_rcode_counts:
         print("DNS response codes (PASS 5):")
         for name, cnt in dns_rcode_counts.most_common():
@@ -260,6 +315,16 @@ def main():
         print(f"Top DNS queried domains (PASS 5) (top {args.top}):")
         for qname, cnt in dns_domain_counts.most_common(args.top):
             print(f"  {qname:<45} {cnt}")
+
+    print("TCP indicators (PASS 6) (best-effort):")
+    print(f"  SYN:                 {tcp_syn}")
+    print(f"  SYN-ACK:             {tcp_synack}")
+    print(f"  ACK:                 {tcp_ack}")
+    print(f"  FIN:                 {tcp_fin}")
+    print(f"  RST:                 {tcp_rst}")
+    print(f"  Connection attempts: {handshake_attempts}   (unique SYN 4-tuples)")
+    print(f"  Handshake successes: {handshake_successes}  (SYN matched with SYN-ACK)")
+    print(f"  Failed handshakes:   {failed_handshakes_est}")
 
     return 0
 
